@@ -44,18 +44,14 @@ transform=transforms.Compose([
 
 
 def detect(cfg,opt):
-    # Create txt folder
-    txt_result_path = os.path.join(opt.save_dir,'text')
-    if os.path.exists(txt_result_path):
-      shutil.rmtree(txt_result_path)  # delete dir
-    os.mkdir(txt_result_path)
 
-# =========================================
     logger, _, _ = create_logger(
         cfg, cfg.LOG_DIR, 'demo')
 
     device = select_device(logger,opt.device)
-
+    if os.path.exists(opt.save_dir):  # output dir
+        shutil.rmtree(opt.save_dir)  # delete dir
+    os.makedirs(opt.save_dir)  # make new dir
     half = device.type != 'cpu'  # half precision only supported on CUDA
 
     # Load model
@@ -66,187 +62,166 @@ def detect(cfg,opt):
     if half:
         model.half()  # to FP16
 
-
-    if os.path.exists(opt.save_dir):  # output dir
-        shutil.rmtree(opt.save_dir)  # delete dir
     # Set Dataloader
-    source = opt.source
-    list_folder = os.listdir(source)
+    if opt.source.isnumeric():
+        cudnn.benchmark = True  # set True to speed up constant image size inference
+        dataset = LoadStreams(opt.source, img_size=opt.img_size)
+        bs = len(dataset)  # batch_size
+    else:
+        dataset = LoadImages(opt.source, img_size=opt.img_size)
+        bs = 1  # batch_size
 
-    # run every single folder
-    for folder in list_folder:
-      print('===== ', folder)
-      opt.source = os.path.join(source, folder)
-      name_folder_run = str(opt.source).split('/')[-1]
-      
-      # Get speech from txt 
-      ls = os.listdir(opt.source)
-      for i in ls:
-        if '.txt' in i:
-          file_speed = open(os.path.join(opt.source, i), 'r')
-          for item in file_speed:
-            data =  item.split(',')
-            idx = data[0]
-            speed = data[-1]
-            dict_speed.update({idx: speed})
-      
 
-      split = str(opt.save_dir).split('/')
-      if len(split) > 2: # inference/output/trafficjam_1602_12/trafficjam_1602_32/trafficjam_1602_20/trafficjam_1602_23
-        opt.save_dir = os.path.join(split[0], split[1])
+    # Get names and colors
+    names = model.module.names if hasattr(model, 'module') else model.names
+    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
+
+    # Get speech from txt 
+    ls = os.listdir(opt.source)
+    for i in ls:
+    if '.txt' in i:
+        file_speed = open(os.path.join(opt.source, i), 'r')
+        for item in file_speed:
+        data =  item.split(',')
+        idx = data[0]
+        speed = data[-1]
+        dict_speed.update({idx: speed})
+
+    # make txt
+    txt_result_path = os.path.join(opt.save_dir, 'result.txt')
+    txt = open(txt_result_path, 'w')
     
-      opt.save_dir = os.path.join(opt.save_dir, name_folder_run)
-      os.makedirs(opt.save_dir)  # make new dir
-
-      txt = open(os.path.join(opt.save_dir, name_folder_run + '.txt'), 'w')
-      txt2 = open(os.path.join(txt_result_path,name_folder_run + '.txt'), 'w')
-
-      if opt.source.isnumeric():
-          cudnn.benchmark = True  # set True to speed up constant image size inference
-          dataset = LoadStreams(opt.source, img_size=opt.img_size)
-          bs = len(dataset)  # batch_size
-      else:
-          dataset = LoadImages(opt.source, img_size=opt.img_size)
-          bs = 1  # batch_size
+    # Run inference
+    t0 = time.time()
 
 
-      # Get names and colors
-      names = model.module.names if hasattr(model, 'module') else model.names
-      colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
+    vid_path, vid_writer = None, None
+    img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)  # init img
+    _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
+    model.eval()
+
+    inf_time = AverageMeter()
+    nms_time = AverageMeter()
+    
+    for i, (path, img, img_det, vid_cap,shapes) in tqdm(enumerate(dataset),total = len(dataset)):
+        start = time.time()
+        img = transform(img).to(device)
+        img = img.half() if half else img.float()  # uint8 to fp16/32
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+        # Inference
+        t1 = time_synchronized()
+        det_out, da_seg_out,ll_seg_out= model(img)
+        t2 = time_synchronized()
+
+        inf_out, _ = det_out
+        inf_time.update(t2-t1,img.size(0))
+
+        # Apply NMS
+        t3 = time_synchronized()
+        det_pred = non_max_suppression(inf_out, conf_thres=opt.conf_thres, iou_thres=opt.iou_thres, classes=None, agnostic=False)
+        t4 = time_synchronized()
+
+        nms_time.update(t4-t3,img.size(0))
+        det=det_pred[0]
+
+        save_path = str(opt.save_dir +'/'+ Path(path).name) if dataset.mode != 'stream' else str(opt.save_dir + '/' + "web.mp4")
 
 
-      # Run inference
-      t0 = time.time()
+        _, _, height, width = img.shape
+        h,w,_=img_det.shape
+        pad_w, pad_h = shapes[1][1]
+        pad_w = int(pad_w)
+        pad_h = int(pad_h)
+        ratio = shapes[1][0][1]
+
+        da_predict = da_seg_out[:, :, pad_h:(height-pad_h),pad_w:(width-pad_w)]
+        da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
+        _, da_seg_mask = torch.max(da_seg_mask, 1)
+        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
+        # da_seg_mask = morphological_process(da_seg_mask, kernel_size=7)
+
+        
+        ll_predict = ll_seg_out[:, :,pad_h:(height-pad_h),pad_w:(width-pad_w)]
+        ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
+        _, ll_seg_mask = torch.max(ll_seg_mask, 1)
+        ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy()
+        # Lane line post-processing
+        # ll_seg_mask = morphological_process(ll_seg_mask, kernel_size=7, func_type=cv2.MORPH_OPEN)
+        #ll_seg_mask = connect_lane(ll_seg_mask)
+        img_det, segment_img = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
+        # img_det = show_seg_result(img_det,  ll_seg_mask, _, _, is_demo=True)
 
 
-      vid_path, vid_writer = None, None
-      img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)  # init img
-      _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
-      model.eval()
+        if len(det):
+            det[:,:4] = scale_coords(img.shape[2:],det[:,:4],img_det.shape).round()
+            for *xyxy,conf,cls in reversed(det):
+                label_det_pred = f'{names[int(cls)]} {conf:.2f}'
+                plot_one_box(xyxy, img_det , label=label_det_pred, color=colors[int(cls)], line_thickness=2)
+        
+        if dataset.mode == 'images':
+            infer_time = time.time()-start
+            cv2.imwrite(save_path,img_det)
+            # cv2.imwrite(save_path,vanishing(ll_seg_mask,img_det))
+            # countour
+            contour, area = run_contours(segment_img, infer_time)
+            path = save_path.replace('.jpg', '_seg.jpg')
+            cv2.imwrite(path,contour)
+            speed = dict_speed[get_nameImg(path)].replace('\n','')
+            txt.writelines(f'{path}|{area}|{speed}|\n')
+            txt2.writelines(f'{path}|{area}|{speed}|\n')
 
-      inf_time = AverageMeter()
-      nms_time = AverageMeter()
-      
-      for i, (path, img, img_det, vid_cap,shapes) in tqdm(enumerate(dataset),total = len(dataset)):
-          start = time.time()
-          img = transform(img).to(device)
-          img = img.half() if half else img.float()  # uint8 to fp16/32
-          if img.ndimension() == 3:
-              img = img.unsqueeze(0)
-          # Inference
-          t1 = time_synchronized()
-          det_out, da_seg_out,ll_seg_out= model(img)
-          t2 = time_synchronized()
+        elif dataset.mode == 'video':
+            if vid_path != save_path:  # new video
+                vid_path = save_path
+                if isinstance(vid_writer, cv2.VideoWriter):
+                    vid_writer.release()  # release previous video writer
 
-          inf_out, _ = det_out
-          inf_time.update(t2-t1,img.size(0))
+                fourcc = 'mp4v'  # output video codec
+                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                h,w,_=img_det.shape
+                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
+            vid_writer.write(img_det)
+        
+        else:
+            cv2.imshow('image', img_det)
+            cv2.waitKey(1)  # 1 millisecond
 
-          # Apply NMS
-          t3 = time_synchronized()
-          det_pred = non_max_suppression(inf_out, conf_thres=opt.conf_thres, iou_thres=opt.iou_thres, classes=None, agnostic=False)
-          t4 = time_synchronized()
-
-          nms_time.update(t4-t3,img.size(0))
-          det=det_pred[0]
-
-          save_path = str(opt.save_dir +'/'+ Path(path).name) if dataset.mode != 'stream' else str(opt.save_dir + '/' + "web.mp4")
-
-
-          _, _, height, width = img.shape
-          h,w,_=img_det.shape
-          pad_w, pad_h = shapes[1][1]
-          pad_w = int(pad_w)
-          pad_h = int(pad_h)
-          ratio = shapes[1][0][1]
-
-          da_predict = da_seg_out[:, :, pad_h:(height-pad_h),pad_w:(width-pad_w)]
-          da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
-          _, da_seg_mask = torch.max(da_seg_mask, 1)
-          da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
-          # da_seg_mask = morphological_process(da_seg_mask, kernel_size=7)
-
-          
-          ll_predict = ll_seg_out[:, :,pad_h:(height-pad_h),pad_w:(width-pad_w)]
-          ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
-          _, ll_seg_mask = torch.max(ll_seg_mask, 1)
-          ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy()
-          # Lane line post-processing
-          # ll_seg_mask = morphological_process(ll_seg_mask, kernel_size=7, func_type=cv2.MORPH_OPEN)
-          #ll_seg_mask = connect_lane(ll_seg_mask)
-          img_det, segment_img = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
-          # img_det = show_seg_result(img_det,  ll_seg_mask, _, _, is_demo=True)
-
-
-          if len(det):
-              det[:,:4] = scale_coords(img.shape[2:],det[:,:4],img_det.shape).round()
-              for *xyxy,conf,cls in reversed(det):
-                  label_det_pred = f'{names[int(cls)]} {conf:.2f}'
-                  plot_one_box(xyxy, img_det , label=label_det_pred, color=colors[int(cls)], line_thickness=2)
-          
-          if dataset.mode == 'images':
-              infer_time = time.time()-start
-              cv2.imwrite(save_path,img_det)
-              # cv2.imwrite(save_path,vanishing(ll_seg_mask,img_det))
-              # countour
-              contour, area = run_contours(segment_img, infer_time)
-              path = save_path.replace('.jpg', '_seg.jpg')
-              cv2.imwrite(path,contour)
-              speed = dict_speed[get_nameImg(path)].replace('\n','')
-              txt.writelines(f'{path}|{area}|{speed}|\n')
-              txt2.writelines(f'{path}|{area}|{speed}|\n')
-
-          elif dataset.mode == 'video':
-              if vid_path != save_path:  # new video
-                  vid_path = save_path
-                  if isinstance(vid_writer, cv2.VideoWriter):
-                      vid_writer.release()  # release previous video writer
-
-                  fourcc = 'mp4v'  # output video codec
-                  fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                  h,w,_=img_det.shape
-                  vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
-              vid_writer.write(img_det)
-          
-          else:
-              cv2.imshow('image', img_det)
-              cv2.waitKey(1)  # 1 millisecond
-
-      print('Results saved to %s' % Path(opt.save_dir))
-      print('Done. (%.3fs)' % (time.time() - t0))
-      print('inf : (%.4fs/frame)   nms : (%.4fs/frame)' % (inf_time.avg,nms_time.avg))
+    print('Results saved to %s' % Path(opt.save_dir))
+    print('Done. (%.3fs)' % (time.time() - t0))
+    print('inf : (%.4fs/frame)   nms : (%.4fs/frame)' % (inf_time.avg,nms_time.avg))
 
     
     # Run predict congestion
     congestion = predict_trafficCongestion(txt_result_path)
 
 
+
 def predict_trafficCongestion(path_file):
     congestion = False
-    files = os.listdir(path_file)
-    for f in files:
-        txt = pd.read_csv(os.path.join(path_file, files), header=None)
-        name,dt,vt,_ = str(txt.values[0]).split('|')
-        dts = []
-        vts = []
-        for line in txt.values:
-            name,dt,vt,_ = str(line).split('|')
-            dts.append(dt)
-            vts.append(vt)
+    txt = pd.read_csv(path_file), header=None)
+    name,dt,vt,_ = str(txt.values[0]).split('|')
+    dts = []
+    vts = []
+    for line in txt.values:
+        name,dt,vt,_ = str(line).split('|')
+        dts.append(dt)
+        vts.append(vt)
 
-        l_ketxe = []
-        for  i in range(1,4):
-            dt = dts[-i]
-            vt = vts[-i]
-            if float(dt) < 100000 and float(vt) <20 :
-                l_ketxe.append(-1)
-            else:
-                l_ketxe.append(1)
-
-        if sum(l_ketxe) < 0:
-            congestion = True
-            print(f'{f} ket xe')
+    l_ketxe = []
+    for  i in range(1,4):
+        dt = dts[-i]
+        vt = vts[-i]
+        if float(dt) < 100000 and float(vt) <20 :
+            l_ketxe.append(-1)
         else:
-            print(f'{f} khong ket xe')
+            l_ketxe.append(1)
+
+    if sum(l_ketxe) < 0:
+        congestion = True
+        print(f'{f} ket xe')
+    else:
+        print(f'{f} khong ket xe')
 
     return congestion
 
