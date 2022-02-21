@@ -216,6 +216,31 @@ def detect(cfg,opt):
       print('inf : (%.4fs/frame)   nms : (%.4fs/frame)' % (inf_time.avg,nms_time.avg))
 
 
+def predict_trafficCongestion(path_file):
+    files = os.listdir(path_file)
+    for f in files:
+        txt = pd.read_csv(f'{root}/{f}/seg_road.txt', header=None)
+        name,dt,vt,_ = str(txt.values[0]).split('|')
+        dts = []
+        vts = []
+        for line in txt.values:
+            name,dt,vt,_ = str(line).split('|')
+            dts.append(dt)
+            vts.append(vt)
+
+        l_ketxe = []
+        for  i in range(1,4):
+            dt = dts[-i]
+            vt = vts[-i]
+            if float(dt) < 100000 and float(vt) <20 :
+                l_ketxe.append(-1)
+            else:
+                l_ketxe.append(1)
+
+        if sum(l_ketxe) < 0:
+            print(f'{f} ket xe')
+        else:
+            print(f'{f} khong ket xe')
 
 
 def get_nameImg(path):
