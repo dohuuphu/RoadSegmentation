@@ -7,6 +7,7 @@ import imageio
 import time
 import os
 import math
+import pandas as pd
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
@@ -79,13 +80,13 @@ def detect(cfg,opt):
     # Get speech from txt 
     ls = os.listdir(opt.source)
     for i in ls:
-    if '.txt' in i:
-        file_speed = open(os.path.join(opt.source, i), 'r')
-        for item in file_speed:
-        data =  item.split(',')
-        idx = data[0]
-        speed = data[-1]
-        dict_speed.update({idx: speed})
+        if '.txt' in i:
+            file_speed = open(os.path.join(opt.source, i), 'r')
+            for item in file_speed:
+                data =  item.split(',')
+                idx = data[0]
+                speed = data[-1]
+                dict_speed.update({idx: speed})
 
     # make txt
     txt_result_path = os.path.join(opt.save_dir, 'result.txt')
@@ -163,13 +164,17 @@ def detect(cfg,opt):
             infer_time = time.time()-start
             cv2.imwrite(save_path,img_det)
             # cv2.imwrite(save_path,vanishing(ll_seg_mask,img_det))
+
             # countour
             contour, area = run_contours(segment_img, infer_time)
             path = save_path.replace('.jpg', '_seg.jpg')
             cv2.imwrite(path,contour)
+
+            # write result
             speed = dict_speed[get_nameImg(path)].replace('\n','')
-            txt.writelines(f'{path}|{area}|{speed}|\n')
-            txt2.writelines(f'{path}|{area}|{speed}|\n')
+            info = f'{path}|{area}|{speed}|'
+            result_txt.append(info) 
+            txt.writelines(f'{info}\n')
 
         elif dataset.mode == 'video':
             if vid_path != save_path:  # new video
@@ -193,17 +198,17 @@ def detect(cfg,opt):
 
     
     # Run predict congestion
-    congestion = predict_trafficCongestion(txt_result_path)
+    print(txt_result_path)
+    congestion = predict_trafficCongestion()
 
 
 
-def predict_trafficCongestion(path_file):
+def predict_trafficCongestion():
     congestion = False
-    txt = pd.read_csv(path_file), header=None)
-    name,dt,vt,_ = str(txt.values[0]).split('|')
     dts = []
     vts = []
-    for line in txt.values:
+
+    for line in result_txt:
         name,dt,vt,_ = str(line).split('|')
         dts.append(dt)
         vts.append(vt)
@@ -219,9 +224,9 @@ def predict_trafficCongestion(path_file):
 
     if sum(l_ketxe) < 0:
         congestion = True
-        print(f'{f} ket xe')
+        print(f'ket xe')
     else:
-        print(f'{f} khong ket xe')
+        print(f'khong ket xe')
 
     return congestion
 
@@ -356,6 +361,7 @@ def vanishing(ll_seg_mask, img_det ):
 
 
 dict_speed = {}
+result_txt = []
 txt=None
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
