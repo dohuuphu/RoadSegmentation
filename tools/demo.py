@@ -44,7 +44,7 @@ transform=transforms.Compose([
 
 
 def detect(cfg,opt):
-
+    # Create txt folder
     txt_result_path = os.path.join(opt.save_dir,'text')
     if os.path.exists(txt_result_path):
       shutil.rmtree(txt_result_path)  # delete dir
@@ -72,12 +72,14 @@ def detect(cfg,opt):
     # Set Dataloader
     source = opt.source
     list_folder = os.listdir(source)
+
+    # run every single folder
     for folder in list_folder:
       print('===== ', folder)
       opt.source = os.path.join(source, folder)
       name_folder_run = str(opt.source).split('/')[-1]
       
-      #get speech from txt 
+      # Get speech from txt 
       ls = os.listdir(opt.source)
       for i in ls:
         if '.txt' in i:
@@ -135,8 +137,7 @@ def detect(cfg,opt):
           t1 = time_synchronized()
           det_out, da_seg_out,ll_seg_out= model(img)
           t2 = time_synchronized()
-          # if i == 0:
-          #     print(det_out)
+
           inf_out, _ = det_out
           inf_time.update(t2-t1,img.size(0))
 
@@ -360,11 +361,6 @@ if __name__ == '__main__':
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--update', action='store_true', help='update all models')
     opt = parser.parse_args()
-    # =============== get speed ==============
-    
-    # print('save TXT: ',os.path.join("/gdrive/MyDrive/vietmap/VMprojectDec/src/YOLOP",opt.save_dir,'seg_road.txt'))
-    
-
       
     with torch.no_grad():
         detect(cfg,opt)
